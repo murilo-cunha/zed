@@ -283,7 +283,9 @@ impl WorktreeListDelegate {
                         });
 
                         trusted_worktrees.update(cx, |trusted_worktrees, cx| {
-                            if trusted_worktrees.can_trust(parent_worktree.read(cx).id(), cx) {
+                            if trusted_worktrees
+                                .can_trust_local_worktree(parent_worktree.read(cx).id(), cx)
+                            {
                                 trusted_worktrees.trust(
                                     HashSet::from_iter([PathTrust::AbsPath(
                                         new_worktree_path.clone(),

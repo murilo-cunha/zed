@@ -4835,7 +4835,7 @@ impl Project {
             let worktree_id = WorktreeId::from_proto(envelope.payload.worktree_id);
             if let Some(trusted_worktrees) = TrustedWorktrees::try_get_global(cx) {
                 trusted_worktrees.update(cx, |trusted_worktrees, cx| {
-                    trusted_worktrees.can_trust(worktree_id, cx)
+                    trusted_worktrees.can_trust_local_worktree(worktree_id, cx)
                 });
             }
             if let Some(worktree) = project.worktree_for_id(worktree_id, cx) {

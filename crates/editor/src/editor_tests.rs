@@ -30185,7 +30185,9 @@ async fn test_local_worktree_trust(cx: &mut TestAppContext) {
     let trusted_worktrees =
         cx.update(|cx| TrustedWorktrees::try_get_global(cx).expect("trust global should exist"));
 
-    let can_trust = trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+    let can_trust = trusted_worktrees.update(cx, |store, cx| {
+        store.can_trust_local_worktree(worktree_id, cx)
+    });
     assert!(!can_trust, "worktree should be restricted initially");
 
     let buffer_before_approval = project
@@ -30259,8 +30261,9 @@ async fn test_local_worktree_trust(cx: &mut TestAppContext) {
         "inlay hints should be queried after trust approval"
     );
 
-    let can_trust_after =
-        trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+    let can_trust_after = trusted_worktrees.update(cx, |store, cx| {
+        store.can_trust_local_worktree(worktree_id, cx)
+    });
     assert!(can_trust_after, "worktree should be trusted after trust()");
 }
 

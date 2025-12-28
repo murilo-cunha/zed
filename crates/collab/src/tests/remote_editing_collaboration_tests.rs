@@ -1001,10 +1001,12 @@ async fn test_ssh_remote_worktree_trust(cx_a: &mut TestAppContext, server_cx: &m
     let trusted_worktrees =
         cx_a.update(|cx| TrustedWorktrees::try_get_global(cx).expect("trust global should exist"));
 
-    let can_trust_a =
-        trusted_worktrees.update(cx_a, |store, cx| store.can_trust(worktree_ids[0], cx));
-    let can_trust_b =
-        trusted_worktrees.update(cx_a, |store, cx| store.can_trust(worktree_ids[1], cx));
+    let can_trust_a = trusted_worktrees.update(cx_a, |store, cx| {
+        store.can_trust_local_worktree(worktree_ids[0], cx)
+    });
+    let can_trust_b = trusted_worktrees.update(cx_a, |store, cx| {
+        store.can_trust_local_worktree(worktree_ids[1], cx)
+    });
     assert!(!can_trust_a, "project_a should be restricted initially");
     assert!(!can_trust_b, "project_b should be restricted initially");
 
@@ -1081,10 +1083,12 @@ async fn test_ssh_remote_worktree_trust(cx_a: &mut TestAppContext, server_cx: &m
         "inlay hints should be queried after trust approval"
     );
 
-    let can_trust_a =
-        trusted_worktrees.update(cx_a, |store, cx| store.can_trust(worktree_ids[0], cx));
-    let can_trust_b =
-        trusted_worktrees.update(cx_a, |store, cx| store.can_trust(worktree_ids[1], cx));
+    let can_trust_a = trusted_worktrees.update(cx_a, |store, cx| {
+        store.can_trust_local_worktree(worktree_ids[0], cx)
+    });
+    let can_trust_b = trusted_worktrees.update(cx_a, |store, cx| {
+        store.can_trust_local_worktree(worktree_ids[1], cx)
+    });
     assert!(can_trust_a, "project_a should be trusted after trust()");
     assert!(!can_trust_b, "project_b should still be restricted");
 
@@ -1096,10 +1100,12 @@ async fn test_ssh_remote_worktree_trust(cx_a: &mut TestAppContext, server_cx: &m
         );
     });
 
-    let can_trust_a =
-        trusted_worktrees.update(cx_a, |store, cx| store.can_trust(worktree_ids[0], cx));
-    let can_trust_b =
-        trusted_worktrees.update(cx_a, |store, cx| store.can_trust(worktree_ids[1], cx));
+    let can_trust_a = trusted_worktrees.update(cx_a, |store, cx| {
+        store.can_trust_local_worktree(worktree_ids[0], cx)
+    });
+    let can_trust_b = trusted_worktrees.update(cx_a, |store, cx| {
+        store.can_trust_local_worktree(worktree_ids[1], cx)
+    });
     assert!(can_trust_a, "project_a should remain trusted");
     assert!(can_trust_b, "project_b should now be trusted");
 

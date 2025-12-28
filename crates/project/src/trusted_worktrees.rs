@@ -138,7 +138,7 @@ pub struct TrustedWorktreesStore {
     upstream_client: Option<(AnyProtoClient, ProjectId)>,
     worktree_stores: HashMap<WeakEntity<WorktreeStore>, Option<RemoteHostLocation>>,
     trusted_paths: TrustedPaths,
-    restricted: HashMap<Option<ProjectId>, HashSet<WorktreeId>>,
+    restricted: HashMap<Option<RemoteHostLocation>, HashSet<WorktreeId>>,
 }
 
 /// An identifier of a host to split the trust questions by.
@@ -268,13 +268,11 @@ impl TrustedWorktreesStore {
         worktree_store: &Entity<WorktreeStore>,
         cx: &App,
     ) -> bool {
-        let Some(remote_data) = self.worktree_stores.get(&worktree_store.downgrade()) else {
+        let Some(remote_host) = self.worktree_stores.get(&worktree_store.downgrade()) else {
             return false;
         };
-        let project_id = remote_data.as_ref().map(|data| data.project_id);
-
         self.restricted
-            .get(&project_id)
+            .get(remote_host)
             .is_some_and(|restricted_worktrees| {
                 restricted_worktrees.iter().any(|restricted_worktree| {
                     worktree_store
@@ -294,7 +292,6 @@ impl TrustedWorktreesStore {
         remote_host: Option<RemoteHostLocation>,
         cx: &mut Context<Self>,
     ) {
-        let project_id = remote_host.as_ref().map(|host| host.project_id);
         let mut new_trusted_single_file_worktrees = HashSet::default();
         let mut new_trusted_other_worktrees = HashSet::default();
         let mut new_trusted_abs_paths = HashSet::default();
@@ -306,7 +303,7 @@ impl TrustedWorktreesStore {
         ) {
             match trusted_path {
                 PathTrust::Worktree(worktree_id) => {
-                    if let Some(restricted_worktrees) = self.restricted.get_mut(&project_id) {
+                    if let Some(restricted_worktrees) = self.restricted.get_mut(&remote_host) {
                         restricted_worktrees.remove(worktree_id);
                     };
                     if let Some((abs_path, is_file, host)) =
@@ -340,7 +337,7 @@ impl TrustedWorktreesStore {
             new_trusted_single_file_worktrees.clear();
         }
 
-        if let Some(restricted_worktrees) = self.restricted.remove(&project_id) {
+        if let Some(restricted_worktrees) = self.restricted.remove(&remote_host) {
             let new_restricted_worktrees = restricted_worktrees
                 .into_iter()
                 .filter(|restricted_worktree| {
@@ -369,7 +366,8 @@ impl TrustedWorktreesStore {
                     retain
                 })
                 .collect();
-            self.restricted.insert(project_id, new_restricted_worktrees);
+            self.restricted
+                .insert(remote_host.clone(), new_restricted_worktrees);
         }
 
         {
@@ -420,7 +418,7 @@ impl TrustedWorktreesStore {
             match restricted_path {
                 PathTrust::Worktree(worktree_id) => {
                     self.restricted
-                        .entry(remote_host.as_ref().map(|host| host.project_id))
+                        .entry(remote_host.clone())
                         .or_default()
                         .insert(worktree_id);
                     cx.emit(TrustedWorktreesEvent::Restricted(
@@ -443,18 +441,26 @@ impl TrustedWorktreesStore {
     /// If not, emits [`TrustedWorktreesEvent::Restricted`] event if for the first time and not trusted, or no corresponding worktree store was found.
     ///
     /// No events or data adjustment happens when `trust_all_worktrees` auto trust is enabled.
-    pub fn can_trust(&mut self, worktree_id: WorktreeId, cx: &mut Context<Self>) -> bool {
+    pub fn can_trust_local_worktree(
+        &mut self,
+        worktree_id: WorktreeId,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if ProjectSettings::get_global(cx).session.trust_all_worktrees {
             return true;
-        }
-        if self.restricted.contains(&worktree_id) {
-            return false;
         }
 
         let Some((worktree_path, is_file, remote_host)) = self.find_worktree_data(worktree_id, cx)
         else {
             return false;
         };
+        if self
+            .restricted
+            .get(&remote_host)
+            .is_some_and(|restricted_worktrees| restricted_worktrees.contains(&worktree_id))
+        {
+            return false;
+        }
 
         if self
             .trusted_paths
@@ -484,7 +490,10 @@ impl TrustedWorktreesStore {
             return true;
         }
 
-        self.restricted.insert(worktree_id);
+        self.restricted
+            .entry(remote_host.clone())
+            .or_default()
+            .insert(worktree_id);
         cx.emit(TrustedWorktreesEvent::Restricted(
             remote_host,
             HashSet::from_iter([PathTrust::Worktree(worktree_id)]),
@@ -517,14 +526,11 @@ impl TrustedWorktreesStore {
         let Some(remote_host) = self.worktree_stores.get(&worktree_store.downgrade()) else {
             return HashSet::default();
         };
-        let project_id = remote_host
-            .as_ref()
-            .map(|remote_host| remote_host.project_id);
         let mut single_file_paths = HashSet::default();
 
         let other_paths = self
             .restricted
-            .get(&project_id)
+            .get(&remote_host)
             .into_iter()
             .flatten()
             .filter_map(|&restricted_worktree_id| {
@@ -552,19 +558,15 @@ impl TrustedWorktreesStore {
     /// Switches the "trust nothing" mode to "automatically trust everything".
     /// This does not influence already persisted data, but stops adding new worktrees there.
     pub fn auto_trust_all(&mut self, cx: &mut Context<Self>) {
-        for (remote_host, worktrees) in std::mem::take(&mut self.restricted)
-            .into_iter()
-            .flat_map(|restricted_worktree| {
-                let (_, _, host) = self.find_worktree_data(restricted_worktree, cx)?;
-                Some((restricted_worktree, host))
-            })
-            .fold(HashMap::default(), |mut acc, (worktree_id, remote_host)| {
+        for (remote_host, worktrees) in std::mem::take(&mut self.restricted).into_iter().fold(
+            HashMap::default(),
+            |mut acc, (remote_host, worktrees)| {
                 acc.entry(remote_host)
                     .or_insert_with(HashSet::default)
-                    .insert(PathTrust::Worktree(worktree_id));
+                    .extend(worktrees.into_iter().map(PathTrust::Worktree));
                 acc
-            })
-        {
+            },
+        ) {
             self.trust(worktrees, remote_host, cx);
         }
     }
@@ -735,7 +737,9 @@ mod tests {
         })
         .detach();
 
-        let can_trust = trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+        let can_trust = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_id, cx)
+        });
         assert!(!can_trust, "worktree should be restricted by default");
 
         {
@@ -762,8 +766,9 @@ mod tests {
 
         events.borrow_mut().clear();
 
-        let can_trust_again =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+        let can_trust_again = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_id, cx)
+        });
         assert!(!can_trust_again, "worktree should still be restricted");
         assert!(
             events.borrow().is_empty(),
@@ -790,8 +795,9 @@ mod tests {
             }
         }
 
-        let can_trust_after =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+        let can_trust_after = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_id, cx)
+        });
         assert!(can_trust_after, "worktree should be trusted after trust()");
 
         let has_restricted_after = trusted_worktrees.read_with(cx, |store, cx| {
@@ -848,7 +854,9 @@ mod tests {
         })
         .detach();
 
-        let can_trust = trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+        let can_trust = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_id, cx)
+        });
         assert!(
             !can_trust,
             "single-file worktree should be restricted by default"
@@ -888,8 +896,9 @@ mod tests {
             }
         }
 
-        let can_trust_after =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+        let can_trust_after = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_id, cx)
+        });
         assert!(
             can_trust_after,
             "single-file worktree should be trusted after trust()"
@@ -937,8 +946,9 @@ mod tests {
         let trusted_worktrees = init_trust_global(worktree_store, cx);
 
         for &worktree_id in &worktree_ids {
-            let can_trust =
-                trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+            let can_trust = trusted_worktrees.update(cx, |store, cx| {
+                store.can_trust_local_worktree(worktree_id, cx)
+            });
             assert!(
                 !can_trust,
                 "worktree {worktree_id:?} should be restricted initially"
@@ -953,12 +963,15 @@ mod tests {
             );
         });
 
-        let can_trust_0 =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_ids[0], cx));
-        let can_trust_1 =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_ids[1], cx));
-        let can_trust_2 =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_ids[2], cx));
+        let can_trust_0 = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_ids[0], cx)
+        });
+        let can_trust_1 = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_ids[1], cx)
+        });
+        let can_trust_2 = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_ids[2], cx)
+        });
 
         assert!(!can_trust_0, "worktree 0 should still be restricted");
         assert!(can_trust_1, "worktree 1 should be trusted");
@@ -1003,10 +1016,12 @@ mod tests {
 
         let trusted_worktrees = init_trust_global(worktree_store, cx);
 
-        let can_trust_a =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_ids[0], cx));
-        let can_trust_b =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_ids[1], cx));
+        let can_trust_a = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_ids[0], cx)
+        });
+        let can_trust_b = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_ids[1], cx)
+        });
         assert!(!can_trust_a, "project_a should be restricted initially");
         assert!(!can_trust_b, "project_b should be restricted initially");
 
@@ -1018,10 +1033,12 @@ mod tests {
             );
         });
 
-        let can_trust_a =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_ids[0], cx));
-        let can_trust_b =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_ids[1], cx));
+        let can_trust_a = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_ids[0], cx)
+        });
+        let can_trust_b = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_ids[1], cx)
+        });
         assert!(can_trust_a, "project_a should be trusted after trust()");
         assert!(!can_trust_b, "project_b should still be restricted");
 
@@ -1033,10 +1050,12 @@ mod tests {
             );
         });
 
-        let can_trust_a =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_ids[0], cx));
-        let can_trust_b =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_ids[1], cx));
+        let can_trust_a = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_ids[0], cx)
+        });
+        let can_trust_b = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_ids[1], cx)
+        });
         assert!(can_trust_a, "project_a should remain trusted");
         assert!(can_trust_b, "project_b should now be trusted");
     }
@@ -1077,15 +1096,17 @@ mod tests {
 
         let trusted_worktrees = init_trust_global(worktree_store, cx);
 
-        let can_trust_file =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(file_worktree_id, cx));
+        let can_trust_file = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(file_worktree_id, cx)
+        });
         assert!(
             !can_trust_file,
             "single-file worktree should be restricted initially"
         );
 
-        let can_trust_directory =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(dir_worktree_id, cx));
+        let can_trust_directory = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(dir_worktree_id, cx)
+        });
         assert!(
             !can_trust_directory,
             "directory worktree should be restricted initially"
@@ -1099,10 +1120,12 @@ mod tests {
             );
         });
 
-        let can_trust_dir =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(dir_worktree_id, cx));
-        let can_trust_file_after =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(file_worktree_id, cx));
+        let can_trust_dir = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(dir_worktree_id, cx)
+        });
+        let can_trust_file_after = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(file_worktree_id, cx)
+        });
         assert!(can_trust_dir, "directory worktree should be trusted");
         assert!(
             can_trust_file_after,
@@ -1146,15 +1169,17 @@ mod tests {
 
         let trusted_worktrees = init_trust_global(worktree_store, cx);
 
-        let can_trust_file =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(file_worktree_id, cx));
+        let can_trust_file = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(file_worktree_id, cx)
+        });
         assert!(
             !can_trust_file,
             "single-file worktree should be restricted initially"
         );
 
-        let can_trust_directory =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(dir_worktree_id, cx));
+        let can_trust_directory = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(dir_worktree_id, cx)
+        });
         assert!(
             !can_trust_directory,
             "directory worktree should be restricted initially"
@@ -1168,10 +1193,12 @@ mod tests {
             );
         });
 
-        let can_trust_dir =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(dir_worktree_id, cx));
-        let can_trust_file_after =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(file_worktree_id, cx));
+        let can_trust_dir = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(dir_worktree_id, cx)
+        });
+        let can_trust_file_after = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(file_worktree_id, cx)
+        });
         assert!(
             can_trust_dir,
             "directory worktree should be trusted after its parent is trusted"
@@ -1217,8 +1244,9 @@ mod tests {
         let trusted_worktrees = init_trust_global(worktree_store, cx);
 
         for &worktree_id in &worktree_ids {
-            let can_trust =
-                trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+            let can_trust = trusted_worktrees.update(cx, |store, cx| {
+                store.can_trust_local_worktree(worktree_id, cx)
+            });
             assert!(!can_trust, "worktree should be restricted initially");
         }
 
@@ -1231,8 +1259,9 @@ mod tests {
         });
 
         for &worktree_id in &worktree_ids {
-            let can_trust =
-                trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+            let can_trust = trusted_worktrees.update(cx, |store, cx| {
+                store.can_trust_local_worktree(worktree_id, cx)
+            });
             assert!(
                 can_trust,
                 "worktree should be trusted after parent path trust"
@@ -1295,8 +1324,9 @@ mod tests {
         .detach();
 
         for &worktree_id in &worktree_ids {
-            let can_trust =
-                trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+            let can_trust = trusted_worktrees.update(cx, |store, cx| {
+                store.can_trust_local_worktree(worktree_id, cx)
+            });
             assert!(!can_trust, "worktree should be restricted initially");
         }
 
@@ -1312,8 +1342,9 @@ mod tests {
         });
 
         for &worktree_id in &worktree_ids {
-            let can_trust =
-                trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+            let can_trust = trusted_worktrees.update(cx, |store, cx| {
+                store.can_trust_local_worktree(worktree_id, cx)
+            });
             assert!(
                 can_trust,
                 "worktree {worktree_id:?} should be trusted after auto_trust_all"
@@ -1373,7 +1404,9 @@ mod tests {
         })
         .detach();
 
-        let can_trust = trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+        let can_trust = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_id, cx)
+        });
         assert!(!can_trust, "should be restricted initially");
         assert_eq!(events.borrow().len(), 1);
         events.borrow_mut().clear();
@@ -1385,7 +1418,9 @@ mod tests {
                 cx,
             );
         });
-        let can_trust = trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+        let can_trust = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_id, cx)
+        });
         assert!(can_trust, "should be trusted after trust()");
         assert_eq!(events.borrow().len(), 1);
         assert!(matches!(
@@ -1401,7 +1436,9 @@ mod tests {
                 cx,
             );
         });
-        let can_trust = trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+        let can_trust = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_id, cx)
+        });
         assert!(!can_trust, "should be restricted after restrict()");
         assert_eq!(events.borrow().len(), 1);
         assert!(matches!(
@@ -1422,7 +1459,9 @@ mod tests {
                 cx,
             );
         });
-        let can_trust = trusted_worktrees.update(cx, |store, cx| store.can_trust(worktree_id, cx));
+        let can_trust = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(worktree_id, cx)
+        });
         assert!(can_trust, "should be trusted again after second trust()");
         assert_eq!(events.borrow().len(), 1);
         assert!(matches!(
@@ -1472,8 +1511,9 @@ mod tests {
 
         let trusted_worktrees = init_trust_global(worktree_store, cx);
 
-        let can_trust_local =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(local_worktree, cx));
+        let can_trust_local = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(local_worktree, cx)
+        });
         assert!(!can_trust_local, "local worktree restricted on host_a");
 
         trusted_worktrees.update(cx, |store, cx| {
@@ -1484,8 +1524,9 @@ mod tests {
             );
         });
 
-        let can_trust_local_after =
-            trusted_worktrees.update(cx, |store, cx| store.can_trust(local_worktree, cx));
+        let can_trust_local_after = trusted_worktrees.update(cx, |store, cx| {
+            store.can_trust_local_worktree(local_worktree, cx)
+        });
         assert!(
             can_trust_local_after,
             "local worktree should be trusted on local host"
