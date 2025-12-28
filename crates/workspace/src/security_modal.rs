@@ -305,7 +305,7 @@ impl SecurityModal {
             if let Some(worktree_store) = self.worktree_store.upgrade() {
                 let new_restricted_worktrees = trusted_worktrees
                     .read(cx)
-                    .restricted_worktrees(worktree_store.read(cx), cx)
+                    .restricted_worktrees(&worktree_store, cx)
                     .into_iter()
                     .filter_map(|(worktree_id, abs_path)| {
                         let worktree = worktree_store.read(cx).worktree_for_id(worktree_id, cx)?;

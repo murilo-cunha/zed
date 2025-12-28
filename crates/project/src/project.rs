@@ -4902,6 +4902,19 @@ impl Project {
             .update(|cx| TrustedWorktrees::try_get_global(cx))?
             .context("missing trusted worktrees")?;
         trusted_worktrees.update(&mut cx, |trusted_worktrees, cx| {
+            dbg!(
+                this.read(cx)
+                    .lsp_store()
+                    .read(cx)
+                    .upstream_client()
+                    .map(|(_, id)| id),
+                this.read(cx)
+                    .lsp_store()
+                    .read(cx)
+                    .downstream_client()
+                    .map(|(_, id)| id)
+            );
+
             let restricted_paths = envelope
                 .payload
                 .worktree_ids
@@ -4912,9 +4925,9 @@ impl Project {
             let remote_host = this
                 .read(cx)
                 .remote_connection_options(cx)
-                .map(|options| (envelope.payload.project_id, options))
+                .map(|options| (dbg!(envelope.payload.project_id), options))
                 .map(RemoteHostLocation::from);
-            trusted_worktrees.restrict(restricted_paths, remote_host, cx);
+            trusted_worktrees.restrict(dbg!(restricted_paths), remote_host, cx);
         })?;
         Ok(proto::Ack {})
     }
